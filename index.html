@@ -43,6 +43,8 @@ summary { cursor: pointer; font-weight: 500; }
 .test { display: grid; gap: 8px; margin-top: 10px; }
 .test .line { display: flex; gap: 8px; }
 input { font: 16px var(--mono); color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; min-width: 0; flex: 1; }
+.toggle { display: flex; gap: 10px; align-items: flex-start; font-size: 15px; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+.toggle input { width: 22px; height: 22px; flex: none; margin: 0; accent-color: var(--accent); }
 pre { font: 12px/1.4 var(--mono); color: var(--muted); white-space: pre-wrap; margin: 8px 0 0; max-height: 220px; overflow: auto; }
 .note { color: var(--muted); font-size: 13px; margin: 0; }
 .err { color: var(--bad); }
@@ -60,8 +62,10 @@ pre { font: 12px/1.4 var(--mono); color: var(--muted); white-space: pre-wrap; ma
     <div class="row"><b>Board</b><span id="s-board">Tap Connect, then pick Minimap-…</span></div>
     <div class="row"><b>GPS</b><span id="s-gps">Off</span></div>
     <div class="row"><b>Map</b><span id="s-map">None yet</span></div>
-    <div class="row" id="prog-row" hidden><b>Sending</b><progress id="prog" max="1" value="0"></progress></div>
+    <div class="row" id="prog-row" hidden><b id="prog-label">Roads</b><span><progress id="prog" max="1"></progress><br><span class="note" id="prog-text"></span></span></div>
+    <div class="row"><b>Facing</b><span id="s-head">Waiting for movement</span></div>
   </div>
+  <label class="toggle"><input type="checkbox" id="compass"> Phone is mounted on the bars, facing forward: use its compass when stopped</label>
   <p class="note" id="hint">Open this page in the Bluefy browser: Safari cannot use Bluetooth. Keep the screen on while riding; iOS pauses location when the phone locks.</p>
   <details>
     <summary>Try it at a spot without riding</summary>
@@ -135,26 +139,38 @@ function onDrop() {
 // ---- position and roads
 function sendMe() {
   const p = S.me; if (!p || !S.rx) return;
-  send(`ME ${p.lat.toFixed(6)} ${p.lon.toFixed(6)}${p.heading != null ? ' ' + Math.round(p.heading) : ' 0'} ${p.kmh != null ? p.kmh.toFixed(1) : -1}\n`);
+  // no heading yet: send position only, so the board keeps whatever it had
+  send(p.heading != null ? `ME ${p.lat.toFixed(6)} ${p.lon.toFixed(6)} ${Math.round(p.heading)} ${p.kmh != null ? p.kmh.toFixed(1) : -1}\n`
+                         : `ME ${p.lat.toFixed(6)} ${p.lon.toFixed(6)}\n`);
 }
 async function loadMap(lat, lon) {
   if (S.busy) return;
   S.busy = true; S.lastFetch = Date.now();
   $('s-map').textContent = 'Downloading roads around you…';
+  const bar = $('prog');
+  $('prog-row').hidden = false; $('prog-label').textContent = 'Download';
+  bar.removeAttribute('value');                         // moving bar: the server does not say how big the download is
+  $('prog-text').textContent = 'Asking the map server…';
   try {
-    const osm = await fetchRoads(lat, lon, RADIUS, m => log(m));
+    const t0 = Date.now();
+    const osm = await fetchRoads(lat, lon, RADIUS, m => { log(m); $('prog-text').textContent = 'Server busy, trying another…'; },
+      n => { $('prog-text').textContent = `${(n / 1e6).toFixed(1)} MB downloaded`; });
+    log(`downloaded roads in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
     const map = buildMap(osm, lat, lon, S.room);
     S.map = {...map, lat, lon}; draw();
     const lines = mapLines(map, lat, lon);
     $('s-map').textContent = `Sending ${map.ways.length} roads…`;
-    $('prog-row').hidden = false; $('prog').max = lines.length; $('prog').value = 0;
+    $('prog-label').textContent = 'Sending'; bar.max = lines.length; bar.value = 0;
+    $('prog-text').textContent = `0 of ${map.ways.length} roads to the minimap`;
     const t = Date.now();
     for (let i = 0; i < lines.length; i += 40) {     // a few lines per write, progress as it goes
       if (!S.rx) throw new Error('board disconnected while sending');
       await send(lines.slice(i, i + 40).join('\n') + '\n');
-      $('prog').value = Math.min(i + 40, lines.length);
+      bar.value = Math.min(i + 40, lines.length);
+      $('prog-text').textContent = `${Math.round(bar.value / lines.length * 100)} % to the minimap`;
     }
     S.mapAt = [lat, lon];
+    $('s-map').textContent = `${map.ways.length} roads sent, ${(RADIUS / 1000).toFixed(1)} km around you`;
     log(`sent ${map.ways.length} roads (${map.points} points, ${map.dropped} left out) in ${((Date.now() - t) / 1000).toFixed(0)} s`);
   } catch (e) { log('Map failed: ' + e.message, true); $('s-map').textContent = 'Map failed: will try again'; }
   finally { S.busy = false; $('prog-row').hidden = true; }
@@ -166,17 +182,49 @@ function update(force) {
   const far = !S.mapAt || distance(S.mapAt[0], S.mapAt[1], S.me.lat, S.me.lon) > REFETCH;
   if (S.rx && far && !S.busy && (force || Date.now() - S.lastFetch > 30000)) loadMap(S.me.lat, S.me.lon);
 }
-let prev = null;
+// Which way the map faces. Moving: GPS course over the ground. Slow or stopped: GPS course is noise, so keep the
+// last good one, or use the phone's compass if it is mounted on the bars and the rider switched that on.
+const MOVING_KMH = 7;
+let prev = null, lastGood = null, compass = null, compassAt = 0;
+function headingNow(kmh, gpsHeading) {
+  if (kmh != null && kmh >= MOVING_KMH && gpsHeading != null) { lastGood = gpsHeading; return [gpsHeading, 'GPS, moving']; }
+  if ($('compass').checked && compass != null && Date.now() - compassAt < 3000) return [compass, 'phone compass'];
+  return [lastGood, lastGood == null ? 'waiting for movement' : 'last direction (stopped)'];
+}
 function onFix(pos) {
   if (S.test) return;
-  const c = pos.coords, now = {lat: c.latitude, lon: c.longitude, heading: Number.isFinite(c.heading) ? c.heading : null, kmh: Number.isFinite(c.speed) && c.speed >= 0 ? c.speed * 3.6 : null};
-  if (now.heading == null && prev) {             // work it out from movement when the phone gives none
-    const [x, y] = project(prev.lat, prev.lon)(now.lat, now.lon);
-    if (Math.hypot(x, y) > 4) now.heading = (Math.atan2(x, y) * 180 / Math.PI + 360) % 360; else now.heading = prev.heading;
+  const c = pos.coords;
+  const kmh = Number.isFinite(c.speed) && c.speed >= 0 ? c.speed * 3.6 : null;
+  let course = Number.isFinite(c.heading) && c.heading >= 0 ? c.heading : null;
+  if (course == null && prev) {                   // work it out from movement when the phone gives none
+    const [x, y] = project(prev.lat, prev.lon)(c.latitude, c.longitude);
+    if (Math.hypot(x, y) > 8) course = (Math.atan2(x, y) * 180 / Math.PI + 360) % 360;
   }
-  prev = now; S.me = now;
-  $('s-gps').textContent = `±${Math.round(c.accuracy)} m${now.kmh != null ? ', ' + now.kmh.toFixed(0) + ' km/h' : ''}`;
+  const moved = prev ? Math.hypot(...project(prev.lat, prev.lon)(c.latitude, c.longitude)) : 0;
+  const speed = kmh != null ? kmh : prev && course != null ? moved / Math.max((pos.timestamp - prev.t) / 1000, 0.5) * 3.6 : null;
+  const [heading, source] = headingNow(speed, course);
+  S.me = {lat: c.latitude, lon: c.longitude, heading, kmh: speed};
+  prev = {lat: c.latitude, lon: c.longitude, t: pos.timestamp};
+  $('s-gps').textContent = `±${Math.round(c.accuracy)} m${speed != null ? ', ' + speed.toFixed(0) + ' km/h' : ''}`;
+  $('s-head').textContent = heading == null ? 'Waiting for movement' : `${Math.round(heading)}° from ${source}`;
   update(false);
+}
+function onCompass(e) {
+  // iOS gives the compass heading directly; elsewhere, an absolute alpha counts clockwise the other way
+  const h = e.webkitCompassHeading != null ? e.webkitCompassHeading : e.absolute && e.alpha != null ? (360 - e.alpha) % 360 : null;
+  if (h == null) return;
+  compass = compass == null ? h : compass + ((((h - compass) % 360) + 540) % 360 - 180) * 0.2;   // smooth across 0/360
+  compass = (compass + 360) % 360; compassAt = Date.now();
+}
+async function compassToggle() {
+  if (!$('compass').checked) return;
+  try {
+    if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) {
+      if (await DeviceOrientationEvent.requestPermission() !== 'granted') throw new Error('compass permission refused');
+    }
+    window.addEventListener('deviceorientationabsolute', onCompass);
+    window.addEventListener('deviceorientation', onCompass);
+  } catch (e) { $('compass').checked = false; log('Compass: ' + e.message, true); }
 }
 async function startRide() {
   if (!navigator.geolocation) { log('No location on this browser', true); return; }
@@ -225,6 +273,7 @@ function draw() {
 $('connect').onclick = connect;
 $('ride').onclick = startRide;
 $('go-spot').onclick = goSpot;
+$('compass').onchange = compassToggle;
 document.addEventListener('visibilitychange', async () => { if (document.visibilityState === 'visible' && S.wake === null && S.watch != null) { try { S.wake = await navigator.wakeLock?.request('screen'); } catch (e) {} } });
 draw();
 if (!navigator.bluetooth) $('hint').innerHTML = '<span class="err">No Bluetooth in this browser.</span> On iPhone, open this page in the free Bluefy browser.';
