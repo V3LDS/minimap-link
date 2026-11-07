@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Minimap Link</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Saira+Semi+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400&display=swap">
+<style>
+/* Layout: one column for a phone on the bars: the round map on top, big controls, status rows. Dark: used outdoors and at night. */
+:root {
+  color-scheme: dark;
+  --bg: #0e1418; --panel: #172026; --line: #2a3640; --fg: #eaf0f3; --muted: #93a6b2;
+  --accent: #d6a252; --go: #4fc48a; --warn: #e6b84a; --bad: #ef6c5c;
+  --display: "Saira Semi Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.45 var(--body); }
+main { max-width: 520px; margin: 0 auto; padding-block: max(14px, env(safe-area-inset-top, 0px)) 40px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 16px; }
+h1 { font: 700 26px/1.1 var(--display); margin: 0; letter-spacing: .01em; }
+.top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.chip { font: 500 13px/1 var(--body); padding: 6px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.chip.on { color: var(--go); border-color: var(--go); }
+.chip.busy { color: var(--warn); border-color: var(--warn); }
+.mapwrap { position: relative; width: min(100%, 360px); aspect-ratio: 1; margin: 0 auto; }
+canvas { width: 100%; height: 100%; display: block; border-radius: 50%; background: #071016; }
+.buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+button { font: 600 17px var(--body); color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 12px; cursor: pointer; min-height: 52px; }
+button.primary { background: var(--accent); color: #1b1305; border-color: var(--accent); }
+button:disabled { opacity: .45; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.rows { display: grid; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.row { display: grid; grid-template-columns: 76px 1fr; gap: 10px; padding: 10px 12px; background: var(--panel); border-top: 1px solid var(--line); min-width: 0; }
+.row:first-child { border-top: 0; }
+.row b { font-weight: 500; color: var(--muted); font-size: 13px; }
+.row span { overflow-wrap: anywhere; }
+progress { width: 100%; height: 6px; accent-color: var(--accent); }
+details { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+summary { cursor: pointer; font-weight: 500; }
+.test { display: grid; gap: 8px; margin-top: 10px; }
+.test .line { display: flex; gap: 8px; }
+input { font: 16px var(--mono); color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; min-width: 0; flex: 1; }
+pre { font: 12px/1.4 var(--mono); color: var(--muted); white-space: pre-wrap; margin: 8px 0 0; max-height: 220px; overflow: auto; }
+.note { color: var(--muted); font-size: 13px; margin: 0; }
+.err { color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <div class="top"><h1>Minimap Link</h1><span class="chip" id="chip">Not connected</span></div>
+  <div class="mapwrap"><canvas id="map" width="720" height="720" aria-label="Roads sent to the minimap, centred on you"></canvas></div>
+  <div class="buttons">
+    <button class="primary" id="connect" type="button">Connect minimap</button>
+    <button id="ride" type="button" disabled>Start ride</button>
+  </div>
+  <div class="rows">
+    <div class="row"><b>Board</b><span id="s-board">Tap Connect, then pick Minimap-…</span></div>
+    <div class="row"><b>GPS</b><span id="s-gps">Off</span></div>
+    <div class="row"><b>Map</b><span id="s-map">None yet</span></div>
+    <div class="row" id="prog-row" hidden><b>Sending</b><progress id="prog" max="1" value="0"></progress></div>
+  </div>
+  <p class="note" id="hint">Open this page in the Bluefy browser: Safari cannot use Bluetooth. Keep the screen on while riding; iOS pauses location when the phone locks.</p>
+  <details>
+    <summary>Try it at a spot without riding</summary>
+    <div class="test">
+      <div class="line"><input id="spot" type="text" inputmode="decimal" value="-33.8988, 151.2339" aria-label="Latitude, longitude"><button id="go-spot" type="button" disabled>Send</button></div>
+      <p class="note">Sends that position and the roads around it, as if you were there. Start ride switches back to real GPS.</p>
+    </div>
+  </details>
+  <details>
+    <summary>Log</summary>
+    <pre id="log"></pre>
+  </details>
+  <p class="note">Map data © OpenStreetMap contributors, Open Database Licence.</p>
+</main>
+<script src="minimap-phone.js"></script>
+<script>
+const NUS = '6e400001-b5a3-f393-e0a9-e50e24dcca9e', RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e', TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+const RADIUS = 2500, REFETCH = 1200;
+const $ = id => document.getElementById(id);
+const S = {dev: null, rx: null, room: {points: 5000, ways: 1600}, loaded: 0, mapAt: null, map: null, me: null, busy: false, queue: Promise.resolve(), chunk: 512, watch: null, lastMe: 0, lastFetch: 0, wake: null, test: false};
+
+function log(m, bad) { const l = $('log'); l.textContent = new Date().toLocaleTimeString() + '  ' + m + '\n' + l.textContent.slice(0, 6000); if (bad) $('hint').innerHTML = '<span class="err">' + m.replace(/</g, '&lt;') + '</span>'; }
+function chip(text, cls) { $('chip').textContent = text; $('chip').className = 'chip ' + (cls || ''); }
+
+// ---- Bluetooth: lines go out one write at a time, in order
+function send(text) {
+  const bytes = new TextEncoder().encode(text);
+  S.queue = S.queue.then(async () => {
+    if (!S.rx) return;
+    for (let i = 0; i < bytes.length;) {
+      const part = bytes.slice(i, i + S.chunk);
+      try { await S.rx.writeValueWithResponse(part); i += part.length; }
+      catch (e) { if (S.chunk > 180) { S.chunk = 180; log('long writes refused, using 180-byte writes'); } else throw e; }
+    }
+  }).catch(e => log('Bluetooth write failed: ' + e.message, true));
+  return S.queue;
+}
+function onReply(ev) {
+  const text = new TextDecoder().decode(ev.target.value).trim();
+  for (const line of text.split('\n')) {
+    log('board: ' + line);
+    const m = line.match(/live-map (\d+) points (\d+) ways loaded (\d+) at (-?[\d.]+) (-?[\d.]+)/);
+    if (m) { S.room = {points: +m[1], ways: +m[2]}; S.loaded = +m[3]; if (S.loaded && S.map) S.mapAt = [+m[4], +m[5]]; else if (!S.loaded) S.mapAt = null; }
+    const ok = line.match(/ok map (\d+) ways (\d+) points/);
+    if (ok) $('s-map').textContent = `${ok[1]} roads on the board, ${(RADIUS / 1000).toFixed(1)} km around ${S.mapAt ? 'the map centre' : 'you'}`;
+  }
+}
+async function connect() {
+  if (!navigator.bluetooth) { log('This browser has no Bluetooth. On iPhone, open the page in Bluefy.', true); return; }
+  try {
+    S.dev = S.dev || await navigator.bluetooth.requestDevice({filters: [{namePrefix: 'Minimap'}], optionalServices: [NUS]});
+    S.dev.removeEventListener('gattserverdisconnected', onDrop); S.dev.addEventListener('gattserverdisconnected', onDrop);
+    chip('Connecting…', 'busy');
+    const server = await S.dev.gatt.connect();
+    const svc = await server.getPrimaryService(NUS);
+    S.rx = await svc.getCharacteristic(RX);
+    const tx = await svc.getCharacteristic(TX);
+    await tx.startNotifications(); tx.addEventListener('characteristicvaluechanged', onReply);
+    chip(S.dev.name, 'on'); $('s-board').textContent = S.dev.name + ' connected';
+    $('ride').disabled = false; $('go-spot').disabled = false; $('connect').textContent = 'Reconnect';
+    await send('HELLO\n');
+    await new Promise(r => setTimeout(r, 400));
+    if (S.me) update(true);
+  } catch (e) { chip('Not connected'); log('Could not connect: ' + e.message, true); }
+}
+function onDrop() {
+  S.rx = null; chip('Reconnecting…', 'busy'); $('s-board').textContent = 'Connection lost, trying again';
+  setTimeout(() => S.dev && connect(), 1500);
+}
+
+// ---- position and roads
+function sendMe() {
+  const p = S.me; if (!p || !S.rx) return;
+  send(`ME ${p.lat.toFixed(6)} ${p.lon.toFixed(6)}${p.heading != null ? ' ' + Math.round(p.heading) : ' 0'} ${p.kmh != null ? p.kmh.toFixed(1) : -1}\n`);
+}
+async function loadMap(lat, lon) {
+  if (S.busy) return;
+  S.busy = true; S.lastFetch = Date.now();
+  $('s-map').textContent = 'Downloading roads around you…';
+  try {
+    const osm = await fetchRoads(lat, lon, RADIUS, m => log(m));
+    const map = buildMap(osm, lat, lon, S.room);
+    S.map = {...map, lat, lon}; draw();
+    const lines = mapLines(map, lat, lon);
+    $('s-map').textContent = `Sending ${map.ways.length} roads…`;
+    $('prog-row').hidden = false; $('prog').max = lines.length; $('prog').value = 0;
+    const t = Date.now();
+    for (let i = 0; i < lines.length; i += 40) {     // a few lines per write, progress as it goes
+      if (!S.rx) throw new Error('board disconnected while sending');
+      await send(lines.slice(i, i + 40).join('\n') + '\n');
+      $('prog').value = Math.min(i + 40, lines.length);
+    }
+    S.mapAt = [lat, lon];
+    log(`sent ${map.ways.length} roads (${map.points} points, ${map.dropped} left out) in ${((Date.now() - t) / 1000).toFixed(0)} s`);
+  } catch (e) { log('Map failed: ' + e.message, true); $('s-map').textContent = 'Map failed: will try again'; }
+  finally { S.busy = false; $('prog-row').hidden = true; }
+}
+function update(force) {
+  if (!S.me) return;
+  draw();
+  if (Date.now() - S.lastMe > 900 || force) { S.lastMe = Date.now(); sendMe(); }
+  const far = !S.mapAt || distance(S.mapAt[0], S.mapAt[1], S.me.lat, S.me.lon) > REFETCH;
+  if (S.rx && far && !S.busy && (force || Date.now() - S.lastFetch > 30000)) loadMap(S.me.lat, S.me.lon);
+}
+let prev = null;
+function onFix(pos) {
+  if (S.test) return;
+  const c = pos.coords, now = {lat: c.latitude, lon: c.longitude, heading: Number.isFinite(c.heading) ? c.heading : null, kmh: Number.isFinite(c.speed) && c.speed >= 0 ? c.speed * 3.6 : null};
+  if (now.heading == null && prev) {             // work it out from movement when the phone gives none
+    const [x, y] = project(prev.lat, prev.lon)(now.lat, now.lon);
+    if (Math.hypot(x, y) > 4) now.heading = (Math.atan2(x, y) * 180 / Math.PI + 360) % 360; else now.heading = prev.heading;
+  }
+  prev = now; S.me = now;
+  $('s-gps').textContent = `±${Math.round(c.accuracy)} m${now.kmh != null ? ', ' + now.kmh.toFixed(0) + ' km/h' : ''}`;
+  update(false);
+}
+async function startRide() {
+  if (!navigator.geolocation) { log('No location on this browser', true); return; }
+  S.test = false;
+  if (S.watch == null) S.watch = navigator.geolocation.watchPosition(onFix, e => log('Location: ' + e.message, true), {enableHighAccuracy: true, maximumAge: 1000, timeout: 20000});
+  $('s-gps').textContent = 'Waiting for a fix…'; $('ride').textContent = 'Riding';
+  try { S.wake = await navigator.wakeLock?.request('screen'); } catch (e) { /* not offered: keep the screen on by hand */ }
+}
+function goSpot() {
+  const m = $('spot').value.match(/(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)/);
+  if (!m) { log('Type a position as: latitude, longitude', true); return; }
+  S.test = true; S.me = {lat: +m[1], lon: +m[2], heading: 0, kmh: 0};
+  $('s-gps').textContent = 'Test spot (not GPS)'; $('ride').textContent = 'Start ride';
+  update(true);
+}
+
+// ---- preview of what the board has: same colours as the minimap
+const COL = ['#d6a252', '#9eb2c0', '#4e6272', '#46b270', '#344e46', '#20528c'];
+function draw() {
+  const cv = $('map'), g = cv.getContext('2d'), W = cv.width, R = W / 2;
+  g.clearRect(0, 0, W, W);
+  g.save(); g.beginPath(); g.arc(R, R, R - 2, 0, 7); g.clip();
+  g.fillStyle = '#0b1820'; g.fillRect(0, 0, W, W);
+  const range = 600, k = (R - 10) / range;
+  if (S.map && S.me) {
+    const [mx, my] = project(S.map.lat, S.map.lon)(S.me.lat, S.me.lon);
+    g.lineCap = 'round'; g.lineJoin = 'round';
+    for (const kind of [5, 4, 2, 3, 1, 0]) {
+      g.strokeStyle = COL[kind]; g.lineWidth = kind <= 1 ? 6 : kind === 3 ? 4 : 3;
+      for (const w of S.map.ways) {
+        if (w.kind !== kind) continue;
+        g.beginPath();
+        w.pts.forEach(([x, y], i) => { const sx = R + (x - mx) * k, sy = R - (y - my) * k; i ? g.lineTo(sx, sy) : g.moveTo(sx, sy); });
+        g.stroke();
+      }
+    }
+  }
+  g.restore();
+  g.strokeStyle = '#263e50'; g.lineWidth = 3; g.beginPath(); g.arc(R, R, R - 3, 0, 7); g.stroke();
+  // you
+  g.save(); g.translate(R, R); g.rotate(((S.me && S.me.heading) || 0) * Math.PI / 180);
+  g.fillStyle = '#ffffff'; g.beginPath(); g.moveTo(0, -22); g.lineTo(14, 16); g.lineTo(0, 8); g.lineTo(-14, 16); g.closePath(); g.fill(); g.restore();
+  if (!S.me) { g.fillStyle = '#93a6b2'; g.font = '28px IBM Plex Sans, system-ui'; g.textAlign = 'center'; g.fillText('No position yet', R, R + 70); }
+}
+
+$('connect').onclick = connect;
+$('ride').onclick = startRide;
+$('go-spot').onclick = goSpot;
+document.addEventListener('visibilitychange', async () => { if (document.visibilityState === 'visible' && S.wake === null && S.watch != null) { try { S.wake = await navigator.wakeLock?.request('screen'); } catch (e) {} } });
+draw();
+if (!navigator.bluetooth) $('hint').innerHTML = '<span class="err">No Bluetooth in this browser.</span> On iPhone, open this page in the free Bluefy browser.';
+</script>
+</body>
+</html>
