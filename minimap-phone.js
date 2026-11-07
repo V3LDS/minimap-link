@@ -114,15 +114,27 @@ function mapLines(map, lat0, lon0) {
 const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter',
                   'https://maps.mail.ru/osm/tools/overpass/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
 
-async function fetchRoads(lat, lon, radius, log = () => {}) {
+// onBytes(received): called as the download streams in (servers rarely say the total size up front)
+async function fetchRoads(lat, lon, radius, log = () => {}, onBytes = () => {}) {
   const body = 'data=' + encodeURIComponent(overpassQuery(lat, lon, radius));
   let last = '';
   for (const url of OVERPASS) {
     try {
-      const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 30000);
+      // a server that has not started answering in 15 s is busy: move on. Once it answers, let the download run.
+      const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 15000);
       const r = await fetch(url, {method: 'POST', body, signal: ctl.signal, headers: {'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json'}});
       clearTimeout(timer);
-      const text = await r.text();
+      let text = '';
+      if (r.body && r.body.getReader) {
+        const reader = r.body.getReader(), dec = new TextDecoder();
+        let got = 0;
+        for (;;) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          got += value.length; text += dec.decode(value, {stream: true}); onBytes(got);
+        }
+        text += dec.decode();
+      } else text = await r.text();
       if (r.ok && text.trim().startsWith('{')) return JSON.parse(text);
       last = `${new URL(url).host}: ${r.status}`;
     } catch (e) { last = `${new URL(url).host}: ${e.name === 'AbortError' ? 'timed out' : e.message}`; }
